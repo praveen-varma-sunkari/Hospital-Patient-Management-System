@@ -507,7 +507,7 @@ export default function App() {
 
     try {
       if (wardFormData.wardType === 'ICU Bed') {
-        await updateDoc(doc(db, 'system', 'config'), { icuOccupied: increment(1) });
+        await setDoc(doc(db, 'system', 'config'), { icuOccupied: increment(1) }, { merge: true });
         showToast(`Admitted Patient #${currentServedPatient.id} to ICU Bed. ICU counter updated!`, 'warning');
       } else {
         showToast(`Assigned Patient #${currentServedPatient.id} to ${wardFormData.wardType} (${wardFormData.expectedStayDays} Days stay).`, 'success');
@@ -614,7 +614,7 @@ export default function App() {
 
     try {
       await setDoc(doc(db, 'patients', numericID.toString()), newPatient);
-      await updateDoc(doc(db, 'system', 'config'), { sequenceCounter: newSeq });
+      await setDoc(doc(db, 'system', 'config'), { sequenceCounter: newSeq }, { merge: true });
       setFormSuccess(`Registered Patient #${newPatient.id} (${newPatient.name}) — Auto-Triage: ${TRIAGE_LEVELS[triageLevel].label} (${calculatedTriage.reason})`);
       showToast(`Registered Patient #${newPatient.id} (${TRIAGE_LEVELS[triageLevel].label})`, 'success');
       setFormData({
