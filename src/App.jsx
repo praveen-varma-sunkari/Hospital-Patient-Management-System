@@ -46,6 +46,13 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 
+// ── Firebase Firestore ─────────────────────────────────────────────────────
+import { db } from './firebase';
+import {
+  collection, onSnapshot, updateDoc,
+  deleteDoc, doc, getDocs, setDoc, writeBatch, increment
+} from 'firebase/firestore';
+
 // =====================================================================================
 // 1. BRAND IDENTITY & OFFICIAL LOGO INTEGRATION COMPONENT
 // =====================================================================================
@@ -248,13 +255,14 @@ export default function App() {
 
   const toggleTheme = () => setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
 
-  // Database Vector & Counter State
-  const [masterRegistry, setMasterRegistry] = useState(INITIAL_PATIENTS);
-  const [sequenceCounter, setSequenceCounter] = useState(INITIAL_PATIENTS.length);
+  // Database Vector — synced in real-time from Firebase Firestore
+  const [masterRegistry, setMasterRegistry] = useState([]);
+  const [sequenceCounter, setSequenceCounter] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // ICU Beds Occupied State (Ratio out of total 20 ICU beds)
-  const [icuOccupied, setIcuOccupied] = useState(14);
-  const TOTAL_ICU_BEDS = 20;
+  // ICU Beds Occupied State — persisted in Firestore system config
+  const [icuOccupied, setIcuOccupied] = useState(0);
+  const TOTAL_ICU_BEDS = parseInt(import.meta.env.VITE_TOTAL_ICU_BEDS) || 20;
 
   // Navigation Tab State: 'queue' | 'register' | 'records' | 'wards' | 'log'
   const [activeTab, setActiveTab] = useState('queue');
@@ -293,6 +301,53 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // ── Firebase Firestore Real-Time Sync ────────────────────────────────────
+  // Seeds initial data on first load, then keeps all state in sync live.
+  useEffect(() => {
+    let unsubPatients = () => {};
+    let unsubSystem  = () => {};
+
+    const init = async () => {
+      const patientsRef  = collection(db, 'patients');
+      const systemDocRef = doc(db, 'system', 'config');
+
+      // Seed Firestore with demo patients only on very first load
+      const snap = await getDocs(patientsRef);
+      if (snap.empty) {
+        const batch = writeBatch(db);
+        INITIAL_PATIENTS.forEach(p => {
+          batch.set(doc(db, 'patients', p.id.toString()), { ...p });
+        });
+        await batch.commit();
+        await setDoc(systemDocRef, {
+          sequenceCounter: INITIAL_PATIENTS.length,
+          icuOccupied: 14
+        });
+      }
+
+      // Real-time listener — patients collection
+      unsubPatients = onSnapshot(patientsRef, (s) => {
+        setMasterRegistry(s.docs.map(d => d.data()));
+        setIsLoading(false);
+      });
+
+      // Real-time listener — system counters
+      unsubSystem = onSnapshot(systemDocRef, (d) => {
+        if (d.exists()) {
+          setSequenceCounter(d.data().sequenceCounter || 0);
+          setIcuOccupied(d.data().icuOccupied || 0);
+        }
+      });
+    };
+
+    init().catch(err => {
+      console.error('Firestore init error:', err);
+      setIsLoading(false);
+    });
+
+    return () => { unsubPatients(); unsubSystem(); };
   }, []);
 
   // Registration Form State with Vital Signs
@@ -405,18 +460,24 @@ export default function App() {
   }, [masterRegistry, cmdSearchQuery]);
 
   // Process Next Patient (Dequeue from Priority Queue into Now Serving)
-  const handleProcessNextPatient = () => {
+  const handleProcessNextPatient = async () => {
     if (waitingQueue.length === 0) {
       showToast('Waiting queue is empty. No patients currently waiting.', 'warning');
       return;
     }
-
     const nextPatient = waitingQueue[0];
-    setMasterRegistry(prev => prev.map(p => p.id === nextPatient.id ? { ...p, status: 'SERVED' } : p));
-    setCurrentServedPatient({ ...nextPatient, servedTime: new Date().toLocaleTimeString() });
-    setPrescriptionInput('');
-
-    showToast(`Called Patient #${nextPatient.id} (${nextPatient.name}) for consultation.`, 'success');
+    const servedTime  = new Date().toLocaleTimeString();
+    try {
+      await updateDoc(doc(db, 'patients', nextPatient.id.toString()), {
+        status: 'SERVED', servedTime
+      });
+      setCurrentServedPatient({ ...nextPatient, servedTime });
+      setPrescriptionInput('');
+      showToast(`Called Patient #${nextPatient.id} (${nextPatient.name}) for consultation.`, 'success');
+    } catch (err) {
+      console.error('Process patient error:', err);
+      showToast('Database error: could not process patient.', 'warning');
+    }
   };
 
   // Open Ward Admission Modal
@@ -431,7 +492,7 @@ export default function App() {
   };
 
   // Confirm Inpatient Ward Admission
-  const handleConfirmWardAdmission = (e) => {
+  const handleConfirmWardAdmission = async (e) => {
     e.preventDefault();
     if (!currentServedPatient) return;
 
@@ -442,110 +503,94 @@ export default function App() {
       expectedStayDays: wardFormData.expectedStayDays
     };
 
-    setCurrentServedPatient(prev => ({
-      ...prev,
-      wardAdmission: admissionInfo
-    }));
+    setCurrentServedPatient(prev => ({ ...prev, wardAdmission: admissionInfo }));
 
-    // If admitted to ICU Bed, increment ICU bed occupancy ratio if under capacity
-    if (wardFormData.wardType === 'ICU Bed') {
-      setIcuOccupied(prev => Math.min(TOTAL_ICU_BEDS, prev + 1));
-      showToast(`Admitted Patient #${currentServedPatient.id} to ICU Bed. ICU counter updated!`, 'warning');
-    } else {
-      showToast(`Assigned Patient #${currentServedPatient.id} to ${wardFormData.wardType} (${wardFormData.expectedStayDays} Days stay).`, 'success');
+    try {
+      if (wardFormData.wardType === 'ICU Bed') {
+        await updateDoc(doc(db, 'system', 'config'), { icuOccupied: increment(1) });
+        showToast(`Admitted Patient #${currentServedPatient.id} to ICU Bed. ICU counter updated!`, 'warning');
+      } else {
+        showToast(`Assigned Patient #${currentServedPatient.id} to ${wardFormData.wardType} (${wardFormData.expectedStayDays} Days stay).`, 'success');
+      }
+    } catch (err) {
+      console.error('Ward admission error:', err);
     }
-
     setIsWardModalOpen(false);
   };
 
   // Discharge Patient from Ward
-  const handleDischargeFromWard = (patientId) => {
+  const handleDischargeFromWard = async (patientId) => {
     const target = masterRegistry.find(p => p.id === patientId);
     if (!target) return;
-
-    setMasterRegistry(prev => prev.map(p => {
-      if (p.id === patientId) {
-        return {
-          ...p,
-          wardAdmission: {
-            ...p.wardAdmission,
-            admitted: false,
-            dischargedDate: new Date().toLocaleString()
-          }
-        };
-      }
-      return p;
-    }));
-
-    showToast(`Discharged Patient #${patientId} (${target.name}) from Inpatient Ward.`, 'success');
+    try {
+      await updateDoc(doc(db, 'patients', patientId.toString()), {
+        wardAdmission: {
+          ...target.wardAdmission,
+          admitted: false,
+          dischargedDate: new Date().toLocaleString()
+        }
+      });
+      showToast(`Discharged Patient #${patientId} (${target.name}) from Inpatient Ward.`, 'success');
+    } catch (err) {
+      console.error('Ward discharge error:', err);
+      showToast('Database error: could not discharge patient.', 'warning');
+    }
   };
 
   // Discharge Currently Served Patient with Prescription Notes & Ward Admission Details
-  const handleDischargePatient = () => {
+  const handleDischargePatient = async () => {
     if (!currentServedPatient) return;
-
     const updatedPrescription = prescriptionInput.trim() || 'Standard clinical observation & routine discharge advice.';
-
-    // Update patient record in Master Registry
-    setMasterRegistry(prev => prev.map(p => {
-      if (p.id === currentServedPatient.id) {
-        return {
-          ...p,
-          status: 'SERVED',
-          servedTime: currentServedPatient.servedTime || new Date().toLocaleTimeString(),
-          prescription: updatedPrescription,
-          wardAdmission: currentServedPatient.wardAdmission || null
-        };
-      }
-      return p;
-    }));
-
-    const statusMsg = currentServedPatient.wardAdmission 
-      ? `Completed consultation & Admitted Patient #${currentServedPatient.id} (${currentServedPatient.name}) to ${currentServedPatient.wardAdmission.wardType}.`
-      : `Discharged Patient #${currentServedPatient.id} (${currentServedPatient.name}) successfully.`;
-
-    showToast(statusMsg, 'success');
-    setCurrentServedPatient(null);
-    setPrescriptionInput('');
+    try {
+      await updateDoc(doc(db, 'patients', currentServedPatient.id.toString()), {
+        status: 'SERVED',
+        servedTime: currentServedPatient.servedTime || new Date().toLocaleTimeString(),
+        prescription: updatedPrescription,
+        wardAdmission: currentServedPatient.wardAdmission || null
+      });
+      const statusMsg = currentServedPatient.wardAdmission
+        ? `Completed consultation & Admitted Patient #${currentServedPatient.id} (${currentServedPatient.name}) to ${currentServedPatient.wardAdmission.wardType}.`
+        : `Discharged Patient #${currentServedPatient.id} (${currentServedPatient.name}) successfully.`;
+      showToast(statusMsg, 'success');
+      setCurrentServedPatient(null);
+      setPrescriptionInput('');
+    } catch (err) {
+      console.error('Discharge error:', err);
+      showToast('Database error: could not discharge patient.', 'warning');
+    }
   };
 
   // Handle Form Registration Submission with Vital Signs
-  const handleRegisterSubmit = (e) => {
+  const handleRegisterSubmit = async (e) => {
     e.preventDefault();
     setFormError('');
     setFormSuccess('');
 
-    const numericID = parseInt(formData.id, 10);
+    const numericID  = parseInt(formData.id, 10);
     const numericAge = parseInt(formData.age, 10);
 
     if (isNaN(numericID) || numericID <= 0) {
       setFormError('Patient ID must be a positive integer.');
       return;
     }
-
     if (masterRegistry.some(p => p.id === numericID)) {
       setFormError(`Duplicate ID Error: Patient ID #${numericID} already exists in master registry.`);
       return;
     }
-
     if (!formData.name.trim()) {
       setFormError('Full Name is required.');
       return;
     }
-
     if (isNaN(numericAge) || numericAge <= 0 || numericAge > 120) {
       setFormError('Please enter a valid age between 1 and 120.');
       return;
     }
-
     if (!formData.condition.trim()) {
       setFormError('Medical Condition / Symptoms required.');
       return;
     }
 
-    const newSeq = sequenceCounter + 1;
-    setSequenceCounter(newSeq);
-
+    const newSeq     = sequenceCounter + 1;
     const triageLevel = calculatedTriage.level;
 
     const newPatient = {
@@ -567,32 +612,35 @@ export default function App() {
       vitals: { ...formData.vitals }
     };
 
-    setMasterRegistry(prev => [...prev, newPatient]);
-    setFormSuccess(`Registered Patient #${newPatient.id} (${newPatient.name}) — Auto-Triage: ${TRIAGE_LEVELS[triageLevel].label} (${calculatedTriage.reason})`);
-    showToast(`Registered Patient #${newPatient.id} (${TRIAGE_LEVELS[triageLevel].label})`, 'success');
-    
-    // Reset inputs
-    setFormData({
-      id: (numericID + 1).toString(),
-      name: '',
-      age: '',
-      gender: 'Male',
-      contact: '',
-      bloodGroup: 'O+',
-      department: 'Emergency',
-      doctor: 'Dr. Varma',
-      condition: '',
-      isEmergency: false,
-      vitals: { bps: '120', bpd: '80', pulse: '76', spo2: '98', temp: '98.6' }
-    });
+    try {
+      await setDoc(doc(db, 'patients', numericID.toString()), newPatient);
+      await updateDoc(doc(db, 'system', 'config'), { sequenceCounter: newSeq });
+      setFormSuccess(`Registered Patient #${newPatient.id} (${newPatient.name}) — Auto-Triage: ${TRIAGE_LEVELS[triageLevel].label} (${calculatedTriage.reason})`);
+      showToast(`Registered Patient #${newPatient.id} (${TRIAGE_LEVELS[triageLevel].label})`, 'success');
+      setFormData({
+        id: (numericID + 1).toString(),
+        name: '', age: '', gender: 'Male', contact: '',
+        bloodGroup: 'O+', department: 'Emergency', doctor: 'Dr. Varma',
+        condition: '', isEmergency: false,
+        vitals: { bps: '120', bpd: '80', pulse: '76', spo2: '98', temp: '98.6' }
+      });
+    } catch (err) {
+      console.error('Registration error:', err);
+      setFormError('Database error: Failed to register patient. Please try again.');
+    }
   };
 
   // Handle Cancel Appointment / Delete Record
-  const handleCancelPatient = (id) => {
+  const handleCancelPatient = async (id) => {
     const target = masterRegistry.find(p => p.id === id);
     if (!target) return;
-    setMasterRegistry(prev => prev.filter(p => p.id !== id));
-    showToast(`Deleted Patient record #${id} (${target.name}) from system vector.`, 'info');
+    try {
+      await deleteDoc(doc(db, 'patients', id.toString()));
+      showToast(`Deleted Patient record #${id} (${target.name}) from system vector.`, 'info');
+    } catch (err) {
+      console.error('Delete error:', err);
+      showToast('Database error: could not delete patient.', 'warning');
+    }
   };
 
   // Export Master Records Database to CSV
@@ -717,6 +765,18 @@ export default function App() {
     <div className={`min-h-screen transition-colors duration-300 flex flex-col font-sans ${
       theme === 'dark' ? 'bg-[#000000] text-[#f5f5f7]' : 'bg-[#ffffff] text-[#1d1d1f]'
     }`}>
+
+      {/* ── Firestore Loading Overlay ───────────────────────────────────────── */}
+      {isLoading && (
+        <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-black/95 backdrop-blur-sm">
+          <div className="relative mb-6">
+            <div className="w-20 h-20 rounded-full border-4 border-cyan-500/20 border-t-cyan-400 animate-spin"></div>
+            <HeartPulse className="absolute inset-0 m-auto w-8 h-8 text-cyan-400 animate-pulse" />
+          </div>
+          <p className="text-cyan-300 font-mono text-sm font-bold tracking-widest uppercase">Connecting to Database</p>
+          <p className="text-slate-500 font-mono text-xs mt-1">Loading patient records from Firebase...</p>
+        </div>
+      )}
 
       {/* Toast Notification Banner */}
       {toastMessage && (
