@@ -2003,7 +2003,7 @@ export default function App() {
                 <div className="apple-panel rounded-3xl p-6 border border-slate-200 dark:border-neutral-800 space-y-4">
                   <div className="flex items-center justify-between border-b pb-3 border-slate-200 dark:border-neutral-800">
                     <h4 className="text-xs font-mono font-bold text-rose-500 flex items-center gap-2">
-                      <Bed className="w-4 h-4" /> ICU Critical Care Beds Floor Plan (20 Slots)
+                      <Bed className="w-4 h-4" /> ICU Critical Care Beds ({admittedPatientsList.filter(p => p.wardAdmission && p.wardAdmission.wardType === 'ICU Bed').length} Occupied, {20 - admittedPatientsList.filter(p => p.wardAdmission && p.wardAdmission.wardType === 'ICU Bed').length} Remaining)
                     </h4>
                     <span className="text-[10px] font-mono text-slate-400">Red = Occupied • Emerald = Available</span>
                   </div>
@@ -2046,7 +2046,7 @@ export default function App() {
                 <div className="apple-panel rounded-3xl p-6 border border-slate-200 dark:border-neutral-800 space-y-4">
                   <div className="flex items-center justify-between border-b pb-3 border-slate-200 dark:border-neutral-800">
                     <h4 className="text-xs font-mono font-bold text-indigo-500 flex items-center gap-2">
-                      <Building2 className="w-4 h-4" /> Private Rooms & General Wards Floor Plan (20 Rooms)
+                      <Building2 className="w-4 h-4" /> Private/General Floor Plan ({admittedPatientsList.filter(p => p.wardAdmission && p.wardAdmission.wardType !== 'ICU Bed').length} Occupied, {20 - admittedPatientsList.filter(p => p.wardAdmission && p.wardAdmission.wardType !== 'ICU Bed').length} Remaining)
                     </h4>
                     <span className="text-[10px] font-mono text-slate-400">Indigo = Occupied • Emerald = Available</span>
                   </div>
