@@ -506,6 +506,10 @@ export default function App() {
     setCurrentServedPatient(prev => ({ ...prev, wardAdmission: admissionInfo }));
 
     try {
+      await updateDoc(doc(db, 'patients', currentServedPatient.id.toString()), {
+        wardAdmission: admissionInfo
+      });
+
       if (wardFormData.wardType === 'ICU Bed') {
         await setDoc(doc(db, 'system', 'config'), { icuOccupied: increment(1) }, { merge: true });
         showToast(`Admitted Patient #${currentServedPatient.id} to ICU Bed. ICU counter updated!`, 'warning');
